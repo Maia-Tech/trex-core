@@ -13,7 +13,7 @@ from ctypes import *
 
 march = os.uname()[4]
 
-if march == 'aarch64':
+if march == 'aarch64' or march == 'arm64':
     cpu_vendor = 'arm'
 elif march == 'x86_64' or march == 'i386' or march == 'i686':
     cpu_vendor = 'intel'
@@ -25,7 +25,11 @@ else:
 cpu_bits   = '64bit' if sys.maxsize > 0xffffffff else '32bit'
 
 cur_dir = os.path.abspath(os.path.dirname(__file__))
-libzmq = CDLL(os.path.join(cur_dir, cpu_vendor, cpu_bits, 'libzmq.so'), use_errno=True)
+# Try to use system ZMQ first, fall back to bundled version
+try:
+    libzmq = CDLL('/usr/lib/aarch64-linux-gnu/libzmq.so', use_errno=True)
+except OSError:
+    libzmq = CDLL(os.path.join(cur_dir, cpu_vendor, cpu_bits, 'libzmq.so'), use_errno=True)
 
 assert(libzmq)
 
