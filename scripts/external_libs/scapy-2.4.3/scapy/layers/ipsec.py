@@ -174,6 +174,10 @@ if conf.crypto_valid:
         algorithms,
         modes,
     )
+    try:
+        from cryptography.hazmat.decrepit.ciphers.algorithms import TripleDES
+    except ImportError:
+        TripleDES = algorithms.TripleDES
 else:
     log_loading.info("Can't import python-cryptography v1.7+. "
                      "Disabled IPsec encryption/authentication.")
@@ -473,11 +477,11 @@ if algorithms:
     # Using a TripleDES cipher algorithm for DES is done by using the same 64
     # bits key 3 times (done by cryptography when given a 64 bits key)
     CRYPT_ALGOS['DES'] = CryptAlgo('DES',
-                                   cipher=algorithms.TripleDES,
+                                   cipher=TripleDES,
                                    mode=modes.CBC,
                                    key_size=(8,))
     CRYPT_ALGOS['3DES'] = CryptAlgo('3DES',
-                                    cipher=algorithms.TripleDES,
+                                    cipher=TripleDES,
                                     mode=modes.CBC)
     CRYPT_ALGOS['CAST'] = CryptAlgo('CAST',
                                     cipher=algorithms.CAST5,
