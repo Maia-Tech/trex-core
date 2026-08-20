@@ -11,7 +11,12 @@
 # here and a platform suffix on the asset name; do not add one speculatively.
 name: release
 
+# Runs in full on pull requests too, publishing only on master. The build is
+# the entire risk here -- a 25-45 minute compile of a vendored DPDK against a
+# toolchain the codebase predates -- so there is no point learning it is broken
+# only after a merge. A PR run does everything except the last step.
 on:
+  pull_request:
   push:
     branches: [master]
   workflow_dispatch:
@@ -23,7 +28,15 @@ jobs:
   build:
     runs-on: ubuntu-latest
     container:
-      image: rockylinux:10
+      # rockylinux/rockylinux, NOT the Docker official `rockylinux` image --
+      # that one is deprecated and stops at 9, so `rockylinux:10` does not
+      # exist and the job dies in "Initialize containers" before running a
+      # single step.
+      #
+      # Pinned to 10.2 to match the portal's guest image (Rocky-10.2-
+      # GenericCloud) rather than floating on :10, because the whole reason
+      # this builds in a container is to match the target's glibc/libstdc++.
+      image: rockylinux/rockylinux:10.2
 
     steps:
       # BEFORE checkout: actions/checkout shells out to git, which is not in the
@@ -86,7 +99,9 @@ jobs:
           echo "file=$f" >> "$GITHUB_OUTPUT"
           ls -l "$f"; cat "$f.sha256"
 
+      # Everything above this runs on a pull request; only publishing is gated.
       - name: Publish release
+        if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
@@ -108,3 +123,13 @@ jobs:
           files: |
             ${{ steps.pkg.outputs.file }}
             ${{ steps.pkg.outputs.file }}.sha256
+
+      - name: Upload the tarball as a build artifact
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.ver.outputs.version }}-pr${{ github.event.number }}
+          path: |
+            ${{ steps.pkg.outputs.file }}
+            ${{ steps.pkg.outputs.file }}.sha256
+          retention-days: 7
