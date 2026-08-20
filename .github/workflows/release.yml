@@ -1,0 +1,110 @@
+# Build TRex and publish the packaged tarball as a GitHub release.
+#
+# WHY A ROCKY 10 CONTAINER AND NOT ubuntu-latest.
+# `./b configure` MUTATES THE WORKING TREE. ws_main.py:798 renames the vendored
+# scripts/so/x86_64/libstdc++.so.6 out of the way whenever the builder's own
+# libstdc++ is newer than GLIBCXX_3.4.24 -- which is every modern distro. After
+# that the shipped binary resolves libstdc++ (and glibc) from the TARGET system,
+# so the builder and the target have to be the same distro or the tarball dies
+# at exec with a symbol-version error. The only consumer of these releases is a
+# Rocky 10 guest, so we build in Rocky 10. A second guest image means a matrix
+# here and a platform suffix on the asset name; do not add one speculatively.
+name: release
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: rockylinux:10
+
+    steps:
+      # BEFORE checkout: actions/checkout shells out to git, which is not in the
+      # base image. tar and findutils are likewise assumed by the action itself.
+      - name: Install build dependencies
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            gcc gcc-c++ make python3 git zlib-devel binutils \
+            pciutils kmod rsync tar which findutils libnl3 libnl3-devel
+
+      - uses: actions/checkout@v4
+
+      # The build shells out to `git log -n 1` for VERSION_GIT_SHA. Without this
+      # git refuses to read a repo it considers owned by another user and the
+      # version stamp silently becomes empty.
+      - name: Trust the workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Read version
+        id: ver
+        run: |
+          echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+          echo "tag=$(cat VERSION)-maia.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      # MUST RUN BEFORE ./b pkg. Packaging copies bp-sim-64 and bp-sim-64-debug
+      # out of scripts/, and ws_main.py monkey-patches os.system to RAISE on a
+      # non-zero exit -- so a missing file aborts packaging instead of warning.
+      - name: Build the simulator (linux/)
+        run: cd linux && ./b configure && ./b build -j"$(nproc)"
+
+      # --no-ofed-check: there is no Mellanox OFED stack on a hosted runner and
+      # the check is advisory.
+      #
+      # DO NOT ADD --no-old, however tempting the build time is. -march=native is
+      # in the flags for the primary variants, so they are compiled for whatever
+      # CPU this runner happens to have. The `-o` variants are -march=corei7 and
+      # scripts/t-rex-64 falls back to them when the primary binary dies with
+      # SIGILL (exit 132). Dropping them turns a CPU mismatch on the guest into a
+      # hard crash instead of a slower run.
+      - name: Build TRex (linux_dpdk/)
+        run: cd linux_dpdk && ./b configure --no-ofed-check && ./b build -j"$(nproc)"
+
+      # ws_main.py:3157 pkg() already produces exactly the layout the official
+      # trex-tgn.cisco.com tarball has: ../v<VERSION>.tar.gz holding a single
+      # v<VERSION>/ directory, binaries stripped, .so symlinks dereferenced, and
+      # external_libs/ rsynced in. Unlike ./b publish it is not gated by
+      # check_release_permission(), so it is safe to run here.
+      #
+      # It fatals above MAX_PKG_SIZE (290 MB). We currently fit, but not by much.
+      - name: Package
+        run: cd linux_dpdk && ./b pkg
+
+      - name: Checksum
+        id: pkg
+        run: |
+          set -euo pipefail
+          f="${{ steps.ver.outputs.version }}.tar.gz"
+          test -f "$f"
+          sha256sum "$f" > "$f.sha256"
+          echo "file=$f" >> "$GITHUB_OUTPUT"
+          ls -l "$f"; cat "$f.sha256"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.tag }}
+          body: |
+            TRex ${{ steps.ver.outputs.version }} built from ${{ github.sha }}.
+
+            Built in a `rockylinux:10` container and linked against Rocky 10's
+            glibc/libstdc++ -- see the note at the top of the workflow for why
+            that is not incidental.
+
+            Unpack and run:
+
+                curl -fsSL -o trex.tar.gz \
+                  https://github.com/${{ github.repository }}/releases/download/${{ steps.ver.outputs.tag }}/${{ steps.pkg.outputs.file }}
+                tar xzf trex.tar.gz -C /opt/trex
+                cd /opt/trex/${{ steps.ver.outputs.version }}
+                sudo ./t-rex-64 -i --software -c 1 --no-scapy-server
+          files: |
+            ${{ steps.pkg.outputs.file }}
+            ${{ steps.pkg.outputs.file }}.sha256
